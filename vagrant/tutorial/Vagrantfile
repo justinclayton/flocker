@@ -32,9 +32,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   config.vm.provision 'docker', images: [
     'busybox',
     'clusterhq/mongodb',
-    'redis',
     'python:2.7-slim',
-    'clusterhq/flask'
   ]
 
   # Cleanup
