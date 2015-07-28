@@ -46,4 +46,8 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   config.vm.synced_folder '.', '/vagrant', disabled: true
 
   config.cache.scope = :box if Vagrant.has_plugin?('vagrant-cachier')
+
+  # Shared folders are not necessary so there is no need to install the
+  # host's VirtualBox Guest Additions on the guest system.
+  config.vbguest.auto_update = false if Vagrant.has_plugin?('vagrant-vbguest')
 end
