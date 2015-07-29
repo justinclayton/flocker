@@ -11,6 +11,8 @@ import math
 import os
 import re
 import types
+
+from ipaddr import IPv4Address, AddressValueError
 from uuid import UUID
 from hashlib import md5
 
@@ -685,11 +687,20 @@ class FigConfiguration(object):
                 for target_ports_object in target_application_ports:
                     local_port = target_ports_object.internal_port
                     remote_port = target_ports_object.external_port
-                    app_links.append(
-                        Link(local_port=local_port,
-                             remote_port=remote_port,
-                             alias=link_definition['alias'])
-                    )
+                    try:
+                        app_links.append(
+                            Link(local_port=local_port,
+                                 remote_port=remote_port,
+                                 alias=link_definition['alias'])
+                        )
+                    except InvariantException as e:
+                        raise ConfigurationError(
+                            "Application '{application}' has a config "
+                            "error: {errors}".format(
+                                application=application_name,
+                                errors=" ".join(e.invariant_errors),
+                            )
+                        )
             application = self._applications[application_name]
             self._applications[application_name] = application.set(
                 "links", app_links)
@@ -1014,9 +1025,15 @@ class FlockerConfiguration(object):
                     raise ValueError(
                         "Unrecognised keys: {keys}.".format(
                             keys=', '.join(sorted(link))))
-                links.append(Link(local_port=local_port,
-                                  remote_port=remote_port,
-                                  alias=alias))
+                try:
+                    links.append(Link(local_port=local_port,
+                                      remote_port=remote_port,
+                                      alias=alias))
+                except InvariantException as e:
+                    # We've already verified types of Link parameters, so
+                    # that just leaves the alias naming limits as the
+                    # source of error.
+                    raise ValueError(" ".join(e.invariant_errors))
         except ValueError as e:
             raise ConfigurationError(
                 ("Application '{application_name}' has a config error. "
@@ -1241,8 +1258,16 @@ def deployment_from_configuration(deployment_state, deployment_configuration,
 
     node_states = {node.hostname: node for node in deployment_state.nodes}
     nodes = []
+    seen_applications = set()
     for hostname, application_names in (
             deployment_configuration['nodes'].items()):
+        try:
+            IPv4Address(hostname)
+        except AddressValueError:
+            raise ConfigurationError(
+                ('Node "{node_name}" specified, but deployment configuration '
+                 'expects an IPv4 address.').format(node_name=hostname)
+            )
         if not isinstance(application_names, list):
             raise ConfigurationError(
                 "Node {node_name} has a config error. "
@@ -1253,6 +1278,11 @@ def deployment_from_configuration(deployment_state, deployment_configuration,
             )
         node_applications = []
         for name in application_names:
+            if name in seen_applications:
+                raise ConfigurationError(
+                    "Application '{name}' appears more than once.".format(
+                        name=name))
+            seen_applications.add(name)
             application = all_applications.get(name)
             if application is None:
                 raise ConfigurationError(
@@ -1297,58 +1327,3 @@ def model_from_configuration(deployment_state, applications,
     nodes = deployment_from_configuration(
         deployment_state, deployment_configuration, applications)
     return Deployment(nodes=frozenset(nodes))
-
-
-def current_from_configuration(current_configuration):
-    """
-    Validate and coerce the supplied current cluster configuration into a
-    ``Deployment`` instance.
-
-    The passed in configuration is the aggregated output of
-    ``marshal_configuration`` as combined by ``flocker-deploy``.
-
-    :param dict current_configuration: Map of node names to list of
-        application maps.
-
-    :raises ConfigurationError: if there are validation errors.
-
-    :returns: A ``Deployment`` object.
-    """
-    nodes = []
-    for hostname, applications in current_configuration.items():
-        configuration = FlockerConfiguration(applications)
-        node_applications = configuration.applications().values()
-        manifestations = {
-            app.volume.manifestation.dataset_id: app.volume.manifestation
-            for app in node_applications
-            if app.volume is not None}
-
-        nodes.append(Node(hostname=hostname,
-                          applications=node_applications,
-                          manifestations=manifestations))
-    return Deployment(nodes=frozenset(nodes))
-
-
-def marshal_configuration(state):
-    """
-    Generate representation of a node's applications using only simple Python
-    types.
-
-    :param NodeState state: The configuration state to marshal.
-
-    :return: An object representing the node configuration in a structure
-        roughly compatible with the configuration file format.  Only "simple"
-        (easily serialized) Python types will be used: ``dict``, ``list``,
-        ``int``, ``unicode``, etc.
-    """
-    result = {}
-    for application in state.applications:
-        converter = ApplicationMarshaller(application)
-
-        result[application.name] = converter.convert()
-
-    return {
-        "version": 1,
-        "applications": result,
-        "used_ports": sorted(state.used_ports),
-    }

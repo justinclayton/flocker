@@ -4,19 +4,19 @@
 Some thread-related tools.
 """
 
-from zope.interface.interface import Method
-
 from twisted.internet.threads import deferToThreadPool
 
+from ._interface import interface_decorator
 
-def _threaded_method(sync_name, method_name, reactor_name, threadpool_name):
+
+def _threaded_method(method_name, sync_name, reactor_name, threadpool_name):
     """
     Create a method that calls another method in a threadpool.
 
-    :param str sync_name: The name of the attribute of ``self`` on which to
-        look up the other method to run.  This is the "sync" object.
     :param str method_name: The name of the method to look up on the "sync"
         object.
+    :param str sync_name: The name of the attribute of ``self`` on which to
+        look up the other method to run.  This is the "sync" object.
     :param str reactor_name: The name of the attribute of ``self`` referencing
         the reactor to use to get results back to the calling thread.
     :param str threadpool_name: The name of the attribute of ``self``
@@ -60,17 +60,8 @@ def auto_threaded(interface, reactor, sync, threadpool):
 
     :return: The class decorator.
     """
-    for name in interface.names():
-        if not isinstance(interface[name], Method):
-            raise TypeError(
-                "auto_threaded does not support interfaces with non-methods "
-                "attributes"
-            )
-
-    def _threaded_class_decorator(cls):
-        for name in interface.names():
-            setattr(
-                cls, name, _threaded_method(sync, name, reactor, threadpool)
-            )
-        return cls
-    return _threaded_class_decorator
+    return interface_decorator(
+        "auto_threaded",
+        interface, _threaded_method,
+        sync, reactor, threadpool,
+    )

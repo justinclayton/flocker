@@ -17,13 +17,14 @@ There are different categories of classes:
 from uuid import UUID
 from warnings import warn
 from hashlib import md5
+from datetime import datetime
 
 from characteristic import attributes
 from twisted.python.filepath import FilePath
 
 from pyrsistent import (
     pmap, PRecord, field, PMap, CheckedPSet, CheckedPMap, discard,
-    optional as optional_type, CheckedPVector
+    optional as optional_type, CheckedPVector,
     )
 
 from zope.interface import Interface, implementer
@@ -200,6 +201,11 @@ class Link(PRecord):
     an application, and the corresponding external port of a possibly remote
     application.
 
+    The alias is always lower-cased since the resulting environment
+    variables don't care about initial case of alias; upper and lower case
+    versions result in same environment variable. We therefore want ``Link``
+    comparison to be case-insensitive as far as aliases go.
+
     :ivar int local_port: The port the local application expects to access.
         This is used to determine the environment variables to populate in the
         container.
@@ -210,7 +216,12 @@ class Link(PRecord):
     """
     local_port = field(mandatory=True, type=int)
     remote_port = field(mandatory=True, type=int)
-    alias = field(mandatory=True)
+    alias = field(
+        mandatory=True, factory=lambda s: s.lower(),
+        invariant=lambda s: (
+            s.isalnum(), "Link aliases must be alphanumeric."
+        )
+    )
 
 
 class IRestartPolicy(Interface):
@@ -389,6 +400,12 @@ def _keys_match(attribute):
     :return: A function suitable for use as a pyrsistent invariant.
     """
     def key_match_invariant(pmap):
+        # Either the field allows None, in which case this is necessary,
+        # or it doesn't in which case this won't do any harm since
+        # invalidity of None will be enforced elsewhere:
+        if pmap is None:
+            return (True, "")
+
         for (key, value) in pmap.items():
             if key != getattr(value, attribute):
                 return (
@@ -584,7 +601,7 @@ class DatasetHandoff(object):
     """
 
 
-@attributes(["going", "coming", "creating", "resizing", "deleting"])
+@attributes(["going", "creating", "resizing", "deleting"])
 class DatasetChanges(object):
     """
     The dataset-related changes necessary to change the current state to
@@ -593,10 +610,6 @@ class DatasetChanges(object):
     :ivar frozenset going: The ``DatasetHandoff``\ s necessary to let
         other nodes take over hosting datasets being moved away from a
         node.  These must be handed off.
-
-    :ivar frozenset coming: The ``Dataset``\ s necessary to let this
-        node take over hosting of any datasets being moved to
-        this node.  These must be acquired.
 
     :ivar frozenset creating: The ``Dataset``\ s necessary to let this
         node create any new datasets meant to be hosted on
@@ -625,6 +638,89 @@ class IClusterStateChange(Interface):
             with changes from this object applied to it.
         """
 
+    def get_information_wipe():
+        """
+        Create a ``IClusterStateWipe`` that can wipe information added by
+        this change.
+
+        For example, if this update adds information to a particular node,
+        the returned ``IClusterStateChange`` will wipe out that
+        information indicating ignorance about that information. We need
+        this ability in order to expire out-of-date state information.
+
+        :return: A ``IClusterStateWipe`` that undoes this update.
+        """
+
+
+class IClusterStateWipe(Interface):
+    """
+    An ``IClusterStateWipe`` can remove some information from a
+    ``DeploymentState``.
+
+    The type of a provider is implicitly part of its interface. Instances
+    with different types will not replace each other, even if they have
+    same key.
+    """
+    def update_cluster_state(cluster_state):
+        """
+        :param DeploymentState cluster_state: Some current known state of the
+            cluster.
+
+        :return: A new ``DeploymentState`` similar to ``cluster_state`` but
+            with some information removed from it.
+        """
+
+    def key():
+        """
+        Return a key describing what information will be wiped.
+
+        Providers that wipe the same information should return the same
+        key, and providers that wipe different information should return
+        differing keys.
+
+        Different ``IClusterStateWipe`` implementors are presumed to
+        cover different information, so there is no need for the key to
+        express that differentation.
+        """
+
+
+class IClusterStateSource(Interface):
+    """
+    Represents where some cluster state (``IClusterStateChange``) came from.
+    This is presently used for activity/inactivity tracking to inform change
+    wiping.
+    """
+    def last_activity():
+        """
+        :return: The point in time at which the last activity was observed from
+            this source.
+        :rtype: ``datetime.datetime`` (in UTC)
+        """
+
+
+@implementer(IClusterStateSource)
+class ChangeSource(object):
+    """
+    An ``IClusterStateSource`` which reports whatever time it was last told to
+    report.
+
+    :ivar float _last_activity: Recorded activity time.
+    """
+    def __init__(self):
+        self.set_last_activity(0)
+
+    def set_last_activity(self, since_epoch):
+        """
+        Set the time of the last activity.
+
+        :param float since_epoch: Number of seconds since the epoch at which
+            point the activity occurred.
+        """
+        self._last_activity = since_epoch
+
+    def last_activity(self):
+        return datetime.utcfromtimestamp(self._last_activity)
+
 
 def ip_to_uuid(ip):
     """
@@ -647,24 +743,39 @@ class NodeState(PRecord):
 
     :ivar UUID uuid: The node's UUID.
     :ivar unicode hostname: The IP of the node.
-    :ivar applications: A ``PSet`` of ``Application`` instances on this
-        node, or ``None`` if the information is not known.
-    :ivar used_ports: A ``PSet`` of ``int``\ s giving the TCP port numbers
-        in use (by anything) on this node.
-    :ivar PMap manifestations: Mapping between dataset IDs and
-        corresponding ``Manifestation`` instances that are present on the
-        node. Includes both those attached as volumes to any applications,
-        and those that are unattached. ``None`` if this information is
-        unknown.
-    :ivar PMap paths: The filesystem paths of the manifestations on this
-        node. Maps ``dataset_id`` to a ``FilePath``.
+    :ivar applications: A ``PSet`` of ``Application`` instances on this node,
+        or ``None`` if the information is not known.
+    :ivar used_ports: A ``PSet`` of ``int``\ s giving the TCP port numbers in
+        use (by anything) on this node.
+    :ivar PMap manifestations: Mapping between dataset IDs and corresponding
+        ``Manifestation`` instances that are present on the node.  Includes
+        both those attached as volumes to any applications, and those that are
+        unattached.  ``None`` if this information is unknown.
+    :ivar PMap paths: The filesystem paths of the manifestations on this node.
+        Maps ``dataset_id`` to a ``FilePath``.
+    :ivar PMap devices: The OS devices by which datasets are made manifest.
+        Maps ``dataset_id`` (as a ``UUID``) to a ``FilePath``.
     """
+    # Attributes that may be set to None to indicate ignorance:
+    _POTENTIALLY_IGNORANT_ATTRIBUTES = ["used_ports", "applications",
+                                        "manifestations", "paths",
+                                        "devices"]
+
+    # Dataset attributes that must all be non-None if one is non-None:
+    _DATASET_ATTRIBUTES = {"manifestations", "paths", "devices"}
+
+    # Application attributes that must all be non-None if one is non-None:
+    _APPLICATION_ATTRIBUTES = {"applications", "used_ports"}
+
     def __invariant__(self):
-        if self.manifestations is None:
-            return (True, "")
-        for key, value in self.manifestations.items():
-            if key != value.dataset_id:
-                return (False, '%r is not correct key for %r' % (key, value))
+        def _field_missing(fields):
+            num_known_attributes = sum(getattr(self, name) is None
+                                       for name in fields)
+            return num_known_attributes not in (0, len(fields))
+        for fields in (self._APPLICATION_ATTRIBUTES, self._DATASET_ATTRIBUTES):
+            if _field_missing(fields):
+                return (False,
+                        "Either all or none of {} must be set.".format(fields))
         return (True, "")
 
     def __new__(cls, **kwargs):
@@ -680,14 +791,69 @@ class NodeState(PRecord):
 
     uuid = field(type=UUID, mandatory=True)
     hostname = field(type=unicode, factory=unicode, mandatory=True)
-    used_ports = pset_field(int, optional=True)
-    applications = pset_field(Application, optional=True)
-    manifestations = pmap_field(unicode, Manifestation, optional=True)
-    paths = pmap_field(unicode, FilePath, optional=True)
-    devices = pmap_field(UUID, FilePath, optional=True)
+    used_ports = pset_field(int, optional=True, initial=None)
+    applications = pset_field(Application, optional=True, initial=None)
+    manifestations = pmap_field(unicode, Manifestation, optional=True,
+                                initial=None, invariant=_keys_match_dataset_id)
+    paths = pmap_field(unicode, FilePath, optional=True, initial=None)
+    devices = pmap_field(UUID, FilePath, optional=True, initial=None)
 
     def update_cluster_state(self, cluster_state):
         return cluster_state.update_node(self)
+
+    def _provides_information(self):
+        """
+        Return whether the node has some information, i.e. is not completely
+        ignorant.
+        """
+        return any(getattr(self, attr) is not None
+                   for attr in self._POTENTIALLY_IGNORANT_ATTRIBUTES)
+
+    def get_information_wipe(self):
+        """
+        The result wipes any attributes that are set by this instance
+        (i.e. aren't ``None``), and will remove the ``NodeState``
+        completely if result is ``NodeState`` with no knowledge of
+        anything.
+        """
+        attributes = [attr for attr in
+                      self._POTENTIALLY_IGNORANT_ATTRIBUTES
+                      if getattr(self, attr) is not None]
+        return _WipeNodeState(node_uuid=self.uuid, attributes=attributes)
+
+
+@implementer(IClusterStateWipe)
+class _WipeNodeState(PRecord):
+    """
+    Wipe information about a specific node from a ``DeploymentState``.
+
+    Only specific attributes will be wiped. If all attributes have been
+    wiped off the relevant ``NodeState`` then it will also be removed from
+    the ``DeploymentState`` completely.
+
+    :ivar UUID node_uuid: The UUID of the node being wiped.
+    :ivar PSet attributes: Names of ``NodeState`` attributes to wipe.
+    """
+    node_uuid = field(mandatory=True, type=UUID)
+    attributes = pset_field(str)
+
+    def update_cluster_state(self, cluster_state):
+        nodes = {n for n in cluster_state.nodes
+                 if n.uuid == self.node_uuid}
+        if not nodes:
+            return cluster_state
+        [original_node] = nodes
+        updated_node = original_node.evolver()
+        for attribute in self.attributes:
+            updated_node = updated_node.set(attribute, None)
+        updated_node = updated_node.persistent()
+        final_nodes = cluster_state.nodes.discard(original_node)
+        if updated_node._provides_information():
+            final_nodes = final_nodes.add(updated_node)
+        return cluster_state.set("nodes", final_nodes)
+
+    def key(self):
+        return (self.node_uuid, self.attributes)
 
 
 class DeploymentState(PRecord):
@@ -722,14 +888,15 @@ class DeploymentState(PRecord):
         """
         Create new ``DeploymentState`` based on this one which updates an
         existing ``NodeState`` with any known information from the given
-        ``NodeState``. Attributes which are set to ``None` on the given
+        ``NodeState``.  Attributes which are set to ``None` on the given
         update, indicating ignorance, will not be changed in the result.
 
-        The given ``NodeState`` will simply be added if no existing ones
-        have matching hostname.
+        The given ``NodeState`` will simply be added if it doesn't represent a
+        node that is already part of the ``DeploymentState`` (based on UUID
+        comparison).
 
-        :param NodeState node: An update for ``NodeState`` with same
-             hostname in this ``DeploymentState``.
+        :param NodeState node: An update for ``NodeState`` with same UUID in
+            this ``DeploymentState``.
 
         :return DeploymentState: Updated with new ``NodeState``.
         """
@@ -737,12 +904,28 @@ class DeploymentState(PRecord):
         if not nodes:
             return self.transform(["nodes"], lambda s: s.add(node_state))
         [original_node] = nodes
-        updated_node = original_node
+        updated_node = original_node.evolver()
         for key, value in node_state.items():
             if value is not None:
                 updated_node = updated_node.set(key, value)
         return self.set(
-            "nodes", self.nodes.discard(original_node).add(updated_node))
+            "nodes", self.nodes.discard(original_node).add(
+                updated_node.persistent()))
+
+    def all_datasets(self):
+        """
+        :returns: A generator of 2-tuple(``Dataset``, ``Nodestate`` or
+            ``None``) for all the primary manifest datasets and non-manifest
+            datasets in the ``DeploymentState``.
+        """
+        for node in self.nodes:
+            if node.manifestations is None:
+                continue
+            for manifestation in node.manifestations.values():
+                if manifestation.primary:
+                    yield manifestation.dataset, node
+        for dataset in self.nonmanifest_datasets.values():
+            yield dataset, None
 
 
 @implementer(IClusterStateChange)
@@ -755,6 +938,28 @@ class NonManifestDatasets(PRecord):
 
     def update_cluster_state(self, cluster_state):
         return cluster_state.set(nonmanifest_datasets=self.datasets)
+
+    def get_information_wipe(self):
+        """
+        Result will wipe all information about non-manifest datasets.
+        """
+        return _NonManifestDatasetsWipe()
+
+
+@implementer(IClusterStateWipe)
+class _NonManifestDatasetsWipe(object):
+    """
+    Wipe object that does nothing.
+
+    There's no point in wiping this information. Even if no relevant
+    agents are connected the datasets probably still continue to exist
+    unchanged, since they're not node-specific.
+    """
+    def key(self):
+        return None
+
+    def update_cluster_state(self, cluster_state):
+        return cluster_state
 
 
 # Classes that can be serialized to disk or sent over the network:

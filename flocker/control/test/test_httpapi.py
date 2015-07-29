@@ -21,10 +21,11 @@ from twisted.web.http import (
     NOT_ALLOWED as METHOD_NOT_ALLOWED
 )
 from twisted.web.http_headers import Headers
-from twisted.web.server import Site
 from twisted.web.client import FileBodyProducer, readBody
 from twisted.application.service import IService
 from twisted.python.filepath import FilePath
+from twisted.internet.ssl import ClientContextFactory
+from twisted.internet.task import Clock
 
 from ...restapi.testtools import (
     buildIntegrationTests, dumps, loads)
@@ -32,13 +33,13 @@ from ...restapi.testtools import (
 from .. import (
     Application, Dataset, Manifestation, Node, NodeState,
     Deployment, AttachedVolume, DockerImage, Port, RestartOnFailure,
-    RestartAlways, RestartNever, Link, same_node, DeploymentState
+    RestartAlways, RestartNever, Link, same_node, DeploymentState,
+    NonManifestDatasets,
 )
 from ..httpapi import (
     ConfigurationAPIUserV1, create_api_service, datasets_from_deployment,
     api_dataset_from_dataset_and_node, container_configuration_response
 )
-from ...node.agents.test.test_blockdevice import REALISTIC_BLOCKDEVICE_SIZE
 from .._persistence import ConfigurationPersistenceService
 from .._clusterstate import ClusterStateService
 from .._config import (
@@ -66,7 +67,7 @@ class APITestsMixin(object):
         self.persistence_service = ConfigurationPersistenceService(
             reactor, FilePath(self.mktemp()))
         self.persistence_service.startService()
-        self.cluster_state_service = ClusterStateService()
+        self.cluster_state_service = ClusterStateService(Clock())
         self.cluster_state_service.startService()
         self.addCleanup(self.cluster_state_service.stopService)
         self.addCleanup(self.persistence_service.stopService)
@@ -663,7 +664,7 @@ class CreateContainerTestsMixin(APITestsMixin):
                         u"remote_port": 54320
                     },
                     {
-                        u"alias": u"another_postgres", u"local_port": 5432,
+                        u"alias": u"anotherpostgres", u"local_port": 5432,
                         u"remote_port": 54321
                     },
                 ]
@@ -2281,124 +2282,6 @@ RealTestsUpdatePrimaryDataset, MemoryTestsUpdatePrimaryDataset = (
 )
 
 
-class UpdateSizeDatasetTestsMixin(APITestsMixin):
-    """
-    Tests for the behaviour of the dataset modification endpoint at
-    ``/configuration/datasets/<dataset_id>`` when supplied with a maximum_size
-    value.
-    """
-    def assert_dataset_resize(self, original_size, new_size,
-                              expected_code=OK, expected_result=None):
-        """
-        Check that a request to resize a dataset results in an `OK` response
-        and that the returned dataset has the expected new size.
-
-        This function first creates and persists a deployment containing a
-        dataset with ``original_size``.  It then issues a dataset update
-        request for that dataset with ``new_size`` and checks that the the
-        response code is ``expected_code`` and that the decoded response body
-        is ``expected_result``.
-
-        ``expected_code`` and ``expected_result`` can be overridden to test
-        cases where the supplied ``new_size`` is invalid.
-
-        :param int original_size: The initial size in bytes of the dataset.
-        :param int new_size: The new size in bytes of the dataset.
-        :param int expected_code: The HTTP status code that is expected in the
-            response.
-        :param dict expected_result: The dictionary of dataset attributes that
-            is expected in the response body.
-
-        :returns: A ``Deferred`` which fires when all assertions have been
-            performed on the result of the dataset update request.
-        """
-        expected_manifestation = _manifestation(
-            maximum_size=original_size
-        )
-
-        if expected_result is None:
-            expected_result = {
-                u'dataset_id': expected_manifestation.dataset_id,
-                u'primary': self.NODE_A,
-                u'deleted': False,
-                u'metadata': {},
-                u'maximum_size': new_size,
-            }
-
-            if new_size is None:
-                del expected_result[u'maximum_size']
-
-        current_primary_node = Node(
-            uuid=self.NODE_A_UUID,
-            applications=[],
-            manifestations={expected_manifestation.dataset_id:
-                            expected_manifestation}
-        )
-        deployment = Deployment(nodes=[current_primary_node])
-        saving = self.persistence_service.save(deployment)
-
-        def resize(result):
-            return self.assertResult(
-                method=b"POST",
-                path=b"/configuration/datasets/%s" % (
-                    bytes(expected_manifestation.dataset_id),
-                ),
-                request_body={u'maximum_size': new_size},
-                expected_code=expected_code,
-                expected_result=expected_result,
-            )
-        return saving.addCallback(resize)
-
-    def test_grow(self):
-        """
-        A dataset maximum_size can be increased.
-        """
-        return self.assert_dataset_resize(
-            original_size=REALISTIC_BLOCKDEVICE_SIZE,
-            new_size=REALISTIC_BLOCKDEVICE_SIZE * 2
-        )
-
-    def test_shrink(self):
-        """
-        A dataset maximum_size can be decreased.
-        """
-        return self.assert_dataset_resize(
-            original_size=REALISTIC_BLOCKDEVICE_SIZE * 2,
-            new_size=REALISTIC_BLOCKDEVICE_SIZE
-        )
-
-    def test_too_small(self):
-        """
-        A dataset must be at least 67108864 bytes.
-        """
-        return self.assert_dataset_resize(
-            original_size=67108864,
-            new_size=67108864 - 1024,
-            expected_code=BAD_REQUEST,
-            expected_result={
-                u'description':
-                u"The provided JSON doesn't match the required schema.",
-                u'errors':
-                [u'67107840 is less than the minimum of 67108864']
-            }
-        )
-
-    def test_remove_limit(self):
-        """
-        A dataset maximum_size can be removed.
-        """
-        return self.assert_dataset_resize(
-            original_size=REALISTIC_BLOCKDEVICE_SIZE,
-            new_size=None
-        )
-
-
-RealTestsUpdateSizeDataset, MemoryTestsUpdateSizeDataset = (
-    buildIntegrationTests(
-        UpdateSizeDatasetTestsMixin, "UpdateSizeDataset", _build_app)
-)
-
-
 class DeleteDatasetTestsMixin(APITestsMixin):
     """
     Tests for the dataset deletion endpoint at
@@ -2747,22 +2630,9 @@ class CreateAPIServiceTests(SynchronousTestCase):
         """
         reactor = MemoryReactor()
         endpoint = TCP4ServerEndpoint(reactor, 6789)
-        verifyObject(IService, create_api_service(None, None, endpoint))
-
-    def test_listens_endpoint(self):
-        """
-        ``create_api_service`` returns a service that listens using the given
-        endpoint with a HTTP server.
-        """
-        reactor = MemoryReactor()
-        endpoint = TCP4ServerEndpoint(reactor, 6789)
-        service = create_api_service(None, None, endpoint)
-        self.addCleanup(service.stopService)
-        service.startService()
-        server = reactor.tcpServers[0]
-        port = server[0]
-        factory = server[1].__class__
-        self.assertEqual((port, factory), (6789, Site))
+        verifyObject(IService, create_api_service(
+            ConfigurationPersistenceService(reactor, FilePath(self.mktemp())),
+            ClusterStateService(reactor), endpoint, ClientContextFactory()))
 
 
 class DatasetsStateTestsMixin(APITestsMixin):
@@ -2770,6 +2640,78 @@ class DatasetsStateTestsMixin(APITestsMixin):
     Tests for the service datasets state description endpoint at
     ``/state/datasets``.
     """
+    def test_nonmanifest_listed(self):
+        """
+        Non-manifest datasets are listed.  The result does not include
+        ``primary`` and ``path`` values.
+        """
+        expected_dataset = Dataset(dataset_id=unicode(uuid4()))
+        self.cluster_state_service.apply_changes([
+            NonManifestDatasets(
+                datasets={
+                    expected_dataset.dataset_id: expected_dataset
+                }
+            )
+        ])
+        expected_dict = dict(
+            dataset_id=expected_dataset.dataset_id,
+        )
+        response = [expected_dict]
+        return self.assertResult(
+            b"GET", b"/state/datasets", None, OK, response
+        )
+
+    def test_nonmanifest_and_manifest(self):
+        """
+        Manifest and non-manifest datasets are listed.
+        """
+        expected_nonmanifest_dataset = Dataset(dataset_id=unicode(uuid4()))
+        expected_manifest_dataset = Dataset(dataset_id=unicode(uuid4()))
+        expected_manifestation = Manifestation(
+            dataset=expected_manifest_dataset, primary=True
+        )
+        expected_hostname = u"192.0.2.101"
+        expected_uuid = uuid4()
+        self.cluster_state_service.apply_changes([
+            NodeState(
+                hostname=expected_hostname,
+                uuid=expected_uuid,
+                manifestations={
+                    expected_manifest_dataset.dataset_id:
+                    expected_manifestation},
+                paths={
+                    expected_manifest_dataset.dataset_id:
+                    FilePath(b"/path/dataset")
+                },
+                devices={
+
+                },
+            ),
+            NonManifestDatasets(
+                datasets={
+                    expected_nonmanifest_dataset.dataset_id:
+                    expected_nonmanifest_dataset
+                }
+            )
+        ])
+        expected_nonmanifest_dict = dict(
+            dataset_id=expected_nonmanifest_dataset.dataset_id,
+        )
+
+        expected_manifest_dict = dict(
+            dataset_id=expected_manifest_dataset.dataset_id,
+            primary=unicode(expected_uuid),
+            path=u"/path/dataset",
+        )
+
+        response = [
+            expected_manifest_dict,
+            expected_nonmanifest_dict
+        ]
+        return self.assertResult(
+            b"GET", b"/state/datasets", None, OK, response
+        )
+
     def test_empty(self):
         """
         When the cluster state includes no datasets, the endpoint
@@ -2808,7 +2750,9 @@ class DatasetsStateTestsMixin(APITestsMixin):
                 uuid=expected_uuid,
                 manifestations={expected_dataset.dataset_id:
                                 expected_manifestation},
-                paths={expected_dataset.dataset_id: FilePath(b"/path/dataset")}
+                paths={
+                    expected_dataset.dataset_id: FilePath(b"/path/dataset")},
+                devices={},
             )
         ])
         expected_dict = dict(
@@ -2843,6 +2787,7 @@ class DatasetsStateTestsMixin(APITestsMixin):
                 manifestations={expected_dataset1.dataset_id:
                                 expected_manifestation1},
                 paths={expected_dataset1.dataset_id: FilePath(b"/aa")},
+                devices={},
             ),
             NodeState(
                 uuid=expected_uuid2,
@@ -2850,6 +2795,7 @@ class DatasetsStateTestsMixin(APITestsMixin):
                 manifestations={expected_dataset2.dataset_id:
                                 expected_manifestation2},
                 paths={expected_dataset2.dataset_id: FilePath(b"/bb")},
+                devices={},
             )
         ])
         expected_dict1 = dict(
@@ -3168,12 +3114,13 @@ class ContainerStateTestsMixin(APITestsMixin):
                 hostname=expected_hostname,
                 uuid=expected_uuid,
                 applications={expected_application},
+                used_ports=[],
                 manifestations={manifestation.dataset_id: manifestation},
+                devices={}, paths={},
             )
         ])
         expected_dict = dict(
             name=u"myapp",
-            host=expected_hostname,
             node_uuid=unicode(expected_uuid),
             image=u"busybox:1.2",
             running=True,
@@ -3216,12 +3163,13 @@ class ContainerStateTestsMixin(APITestsMixin):
                 hostname=expected_hostname,
                 uuid=expected_uuid,
                 applications={expected_application},
+                used_ports=[],
                 manifestations={manifestation.dataset_id: manifestation},
+                devices={}, paths={},
             )
         ])
         expected_dict = dict(
             name=u"myapp",
-            host=expected_hostname,
             node_uuid=unicode(expected_uuid),
             image=u"busybox:1.2",
             running=True,
@@ -3250,11 +3198,11 @@ class ContainerStateTestsMixin(APITestsMixin):
                 uuid=expected_uuid,
                 hostname=expected_hostname,
                 applications={expected_application},
+                used_ports=[],
             )
         ])
         expected_dict = dict(
             name=u"myapp",
-            host=expected_hostname,
             node_uuid=unicode(expected_uuid),
             image=u"busybox:latest",
             running=False,
@@ -3283,16 +3231,17 @@ class ContainerStateTestsMixin(APITestsMixin):
                 hostname=expected_hostname1,
                 uuid=expected_uuid1,
                 applications={expected_application1},
+                used_ports=[],
             ),
             NodeState(
                 hostname=expected_hostname2,
                 uuid=expected_uuid2,
                 applications={expected_application2},
+                used_ports=[],
             )
         ])
         expected_dict1 = dict(
             name=u"myapp",
-            host=expected_hostname1,
             node_uuid=unicode(expected_uuid1),
             image=u"busybox:latest",
             running=True,
@@ -3300,7 +3249,6 @@ class ContainerStateTestsMixin(APITestsMixin):
         )
         expected_dict2 = dict(
             name=u"myapp2",
-            host=expected_hostname2,
             node_uuid=unicode(expected_uuid2),
             image=u"busybox2:latest",
             running=True,
@@ -3359,8 +3307,8 @@ class ConfigurationComposeTestsMixin(APITestsMixin):
     """
     # Match COMPLEX_DEPLOYMENT_YAML:
     DEPLOYMENT_STATE = DeploymentState(nodes=[
-        NodeState(uuid=uuid4(), hostname=u"node1.example.com"),
-        NodeState(uuid=uuid4(), hostname=u"node2.example.com"),
+        NodeState(uuid=uuid4(), hostname=u"172.16.255.250"),
+        NodeState(uuid=uuid4(), hostname=u"172.16.255.251"),
         ])
 
     def configuration_test(self):

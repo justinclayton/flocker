@@ -4,16 +4,25 @@
 Rackspace provisioner.
 """
 
-from ._libcloud import monkeypatch, LibcloudProvisioner
+from ._libcloud import LibcloudProvisioner
 from ._install import (
     provision,
     task_open_control_firewall,
-    task_upgrade_kernel,
 )
 from ._ssh import run_remotely
 
 from ._effect import sequence
-from effect import Func, Effect
+
+
+def get_default_username(distribution):
+    """
+    Return the username available by default on a system.
+
+    :param str distribution: Name of the operating system distribution
+    :return str: The username made available by Rackspace for this
+        distribution.
+    """
+    return 'root'
 
 
 def provision_rackspace(node, package_source, distribution, variants):
@@ -27,18 +36,8 @@ def provision_rackspace(node, package_source, distribution, variants):
         provisioning
     """
     commands = []
-    if distribution in ('centos-7',):
-        commands.append(run_remotely(
-            username='root',
-            address=node.address,
-            commands=sequence([
-                task_upgrade_kernel(node.distribution),
-                Effect(Func(node.reboot)),
-            ]),
-        ))
-
     commands.append(run_remotely(
-        username='root',
+        username=get_default_username(distribution),
         address=node.address,
         commands=sequence([
             provision(
@@ -56,9 +55,9 @@ def provision_rackspace(node, package_source, distribution, variants):
 
 
 IMAGE_NAMES = {
-    'fedora-20': u'Fedora 20 (Heisenbug) (PVHVM)',
     'centos-7': u'CentOS 7 (PVHVM)',
-    'ubuntu-14.04': u'Ubuntu 14.04 LTS (Trusty Tahr) (PVHVM)'
+    'ubuntu-14.04': u'Ubuntu 14.04 LTS (Trusty Tahr) (PVHVM)',
+    'ubuntu-15.04': u'Ubuntu 15.04 (Vivid Vervet) (PVHVM)',
 }
 
 
@@ -76,7 +75,7 @@ def rackspace_provisioner(username, key, region, keyname):
     # Import these here, so that this can be imported without
     # installng libcloud.
     from libcloud.compute.providers import get_driver, Provider
-    monkeypatch()
+
     driver = get_driver(Provider.RACKSPACE)(
         key=username,
         secret=key,
@@ -91,6 +90,7 @@ def rackspace_provisioner(username, key, region, keyname):
         },
         provision=provision_rackspace,
         default_size="performance1-8",
+        get_default_user=get_default_username,
     )
 
     return provisioner

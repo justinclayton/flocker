@@ -8,6 +8,8 @@ from uuid import uuid4, UUID
 
 from pyrsistent import pmap, thaw
 
+from twisted.protocols.tls import TLSMemoryBIOFactory
+
 from twisted.python.filepath import FilePath
 from twisted.web.http import (
     CONFLICT, CREATED, NOT_FOUND, OK, NOT_ALLOWED as METHOD_NOT_ALLOWED,
@@ -22,7 +24,8 @@ from klein import Klein
 from pyrsistent import discard
 
 from ..restapi import (
-    EndpointResponse, structured, user_documentation, make_bad_request
+    EndpointResponse, structured, user_documentation, make_bad_request,
+    private_api
 )
 from . import (
     Dataset, Manifestation, Application, DockerImage, Port,
@@ -104,9 +107,13 @@ class ConfigurationAPIUserV1(object):
         self.cluster_state_service = cluster_state_service
 
     @app.route("/version", methods=['GET'])
-    @user_documentation("""
+    @user_documentation(
+        u"""
         Get the version of Flocker being run.
-        """, examples=[u"get version"])
+        """,
+        section=u"common",
+        header=u"Get Flocker version",
+        examples=[u"get version"])
     @structured(
         inputSchema={},
         outputSchema={'$ref': '/v1/endpoints.json#/definitions/versions'},
@@ -120,10 +127,12 @@ class ConfigurationAPIUserV1(object):
 
     @app.route("/configuration/datasets", methods=['GET'])
     @user_documentation(
-        """
+        u"""
         Get the cluster's dataset configuration.
         """,
+        header=u"Get the cluster's dataset configuration",
         examples=[u"get configured datasets"],
+        section=u"dataset",
     )
     @structured(
         inputSchema={},
@@ -144,16 +153,18 @@ class ConfigurationAPIUserV1(object):
 
     @app.route("/configuration/datasets", methods=['POST'])
     @user_documentation(
-        """
+        u"""
         Create a new dataset.
         """,
+        header=u"Create new dataset",
         examples=[
             u"create dataset",
             u"create dataset with dataset_id",
             u"create dataset with duplicate dataset_id",
             u"create dataset with maximum_size",
             u"create dataset with metadata",
-        ]
+        ],
+        section=u"dataset",
     )
     @structured(
         inputSchema={
@@ -237,16 +248,16 @@ class ConfigurationAPIUserV1(object):
 
     @app.route("/configuration/datasets/<dataset_id>", methods=['DELETE'])
     @user_documentation(
-        """
-        Delete an existing dataset.
-
+        u"""
         Deletion is idempotent: deleting a dataset multiple times will
         result in the same response.
         """,
+        header=u"Delete an existing dataset",
         examples=[
             u"delete dataset",
             u"delete dataset with unknown dataset id",
-        ]
+        ],
+        section=u"dataset",
     )
     @structured(
         inputSchema={},
@@ -290,22 +301,20 @@ class ConfigurationAPIUserV1(object):
 
     @app.route("/configuration/datasets/<dataset_id>", methods=['POST'])
     @user_documentation(
-        """
-        Update an existing dataset.
-
+        u"""
         This can be used to:
 
         * Move a dataset from one node to another by changing the
           ``primary`` attribute.
-        * Resize the dataset by modifying the maximum_size attribute.
         * In the future update metadata.
 
         """,
+        header=u"Update an existing dataset",
         examples=[
             u"update dataset with primary",
             u"update dataset with unknown dataset id",
-            u"update dataset size"
-        ]
+        ],
+        section=u"dataset",
     )
     @structured(
         inputSchema={
@@ -316,8 +325,7 @@ class ConfigurationAPIUserV1(object):
             '/v1/endpoints.json#/definitions/configuration_datasets'},
         schema_store=SCHEMAS
     )
-    def update_dataset(self, dataset_id, primary=None,
-                       maximum_size=_UNDEFINED_MAXIMUM_SIZE):
+    def update_dataset(self, dataset_id, primary=None):
         """
         Update an existing dataset in the cluster configuration.
 
@@ -326,11 +334,6 @@ class ConfigurationAPIUserV1(object):
 
         :param primary: The UUID of the node to which the dataset will be
             moved, or ``None`` indicating no change.
-
-        :param maximum_size: Either the maximum number of bytes the dataset
-            will be capable of storing or ``None`` to make the dataset size
-            unlimited. This may be optional or required depending on the
-            dataset backend.
 
         :return: A ``dict`` describing the dataset which has been added to the
             cluster configuration or giving error information if this is not
@@ -352,11 +355,6 @@ class ConfigurationAPIUserV1(object):
                 deployment, dataset_id, UUID(hex=primary)
             )
 
-        if maximum_size is not _UNDEFINED_MAXIMUM_SIZE:
-            deployment = _update_dataset_maximum_size(
-                deployment, dataset_id, maximum_size
-            )
-
         saving = self.persistence_service.save(deployment)
 
         primary_manifestation, current_node = _find_manifestation_and_node(
@@ -375,13 +373,16 @@ class ConfigurationAPIUserV1(object):
         return saving
 
     @app.route("/state/datasets", methods=['GET'])
-    @user_documentation("""
-        Get current cluster datasets.
-
+    @user_documentation(
+        u"""
         The result reflects the control service's knowledge, which may be
         out of date or incomplete. E.g. a dataset agent has not connected
         or updated the control service yet.
-        """, examples=[u"get state datasets"])
+        """,
+        header=u"Get current cluster datasets",
+        examples=[u"get state datasets"],
+        section=u"dataset",
+    )
     @structured(
         inputSchema={},
         outputSchema={
@@ -391,29 +392,48 @@ class ConfigurationAPIUserV1(object):
     )
     def state_datasets(self):
         """
-        Return the current primary datasets in the cluster.
+        Return all primary manifest datasets and all non-manifest datasets in
+        the cluster.
 
         :return: A ``list`` containing all datasets in the cluster.
         """
+        # XXX This duplicates code in datasets_from_deployment, but that
+        # function is designed to operate on a Deployment rather than a
+        # DeploymentState instance and the dataset configuration result
+        # includes metadata and deleted flags which should not be part of the
+        # dataset state response.
+        # Refactor. See FLOC-2207.
+        response = []
         deployment_state = self.cluster_state_service.as_deployment()
-        datasets = list(datasets_from_deployment(deployment_state))
-        for dataset in datasets:
-            node_uuid = UUID(hex=dataset[u"primary"])
-            dataset[u"path"] = self.cluster_state_service.manifestation_path(
-                node_uuid, dataset[u"dataset_id"]).path.decode(
-                    "utf-8")
-            del dataset[u"metadata"]
-            del dataset[u"deleted"]
-        return datasets
+        get_manifestation_path = self.cluster_state_service.manifestation_path
+
+        for dataset, node in deployment_state.all_datasets():
+            response_dataset = dict(
+                dataset_id=dataset.dataset_id,
+            )
+
+            if node is not None:
+                response_dataset[u"primary"] = unicode(node.uuid)
+                response_dataset[u"path"] = get_manifestation_path(
+                    node.uuid,
+                    dataset[u"dataset_id"]
+                ).path.decode("utf-8")
+
+            if dataset.maximum_size is not None:
+                response_dataset[u"maximum_size"] = dataset.maximum_size
+
+            response.append(response_dataset)
+        return response
 
     @app.route("/configuration/containers", methods=['GET'])
     @user_documentation(
-        """
-        Get the cluster's container configuration.
+        u"""
         These containers may or may not actually exist on the
         cluster.
         """,
+        header=u"Get the cluster's container configuration",
         examples=[u"get configured containers"],
+        section=u"container",
     )
     @structured(
         inputSchema={},
@@ -434,14 +454,14 @@ class ConfigurationAPIUserV1(object):
 
     @app.route("/state/containers", methods=['GET'])
     @user_documentation(
-        """
-        Get the cluster's actual containers.
-
+        u"""
         This reflects the control service's knowledge of the cluster,
         which may be out of date or incomplete, e.g. if a container agent
         has not connected or updated the control service yet.
         """,
+        header=u"Get the cluster's actual containers",
         examples=[u"get actual containers"],
+        section=u"container",
     )
     @structured(
         inputSchema={},
@@ -466,7 +486,6 @@ class ConfigurationAPIUserV1(object):
             for application in node.applications:
                 container = container_configuration_response(
                     application, node.uuid)
-                container[u"host"] = node.hostname
                 container[u"running"] = application.running
                 result.append(container)
         return result
@@ -502,24 +521,26 @@ class ConfigurationAPIUserV1(object):
 
     @app.route("/configuration/containers", methods=['POST'])
     @user_documentation(
-        """
-        Add a new container to the configuration.
-
+        u"""
         The container will be automatically started once it is created on
         the cluster.
         """,
+        header=u"Add a new container to the configuration",
         examples=[
             u"create container",
             u"create container with duplicate name",
             u"create container with ports",
             u"create container with environment",
-            u"create container with restart policy",
             u"create container with attached volume",
             u"create container with cpu shares",
             u"create container with memory limit",
             u"create container with links",
             u"create container with command line",
-        ]
+            # No example of creating a container with a different restart
+            # policy because only the "never" policy is supported.  See
+            # FLOC-2449.
+        ],
+        section=u"container",
     )
     @structured(
         inputSchema={
@@ -677,14 +698,14 @@ class ConfigurationAPIUserV1(object):
 
     @app.route("/configuration/containers/<name>", methods=['POST'])
     @user_documentation(
-        """
-        Update a named container's configuration.
-
+        u"""
         This will lead to the container being relocated to the specified host
         and restarted. This will also update the primary host of any attached
         datasets.
         """,
+        header=u"Update a named container's configuration",
         examples=[u"move container"],
+        section=u"container",
     )
     @structured(
         inputSchema={
@@ -735,17 +756,17 @@ class ConfigurationAPIUserV1(object):
 
     @app.route("/configuration/containers/<name>", methods=['DELETE'])
     @user_documentation(
-        """
-        Remove a container from the configuration.
-
+        u"""
         This will lead to the container being stopped and not being
         restarted again. Any datasets that were attached as volumes will
         continue to exist on the cluster.
         """,
+        header=u"Remove a container from the configuration",
         examples=[
             u"remove a container",
             u"remove a container with unknown name",
-        ]
+        ],
+        section=u"container",
     )
     @structured(
         inputSchema={},
@@ -778,16 +799,16 @@ class ConfigurationAPIUserV1(object):
 
     @app.route("/state/nodes", methods=['GET'])
     @user_documentation(
-        """
-        List known nodes in the cluster.
-
+        u"""
         Some nodes may not be listed if their agents are disconnected from
         the cluster. IP addresses may be private IP addresses that are not
         publicly routable.
         """,
+        header=u"List known nodes in the cluster",
         examples=[
             u"list known nodes",
-        ]
+        ],
+        section=u"common",
     )
     @structured(
         inputSchema={},
@@ -801,14 +822,7 @@ class ConfigurationAPIUserV1(object):
                 self.cluster_state_service.as_deployment().nodes]
 
     @app.route("/configuration/_compose", methods=['POST'])
-    @user_documentation(
-        """
-        Private API endpoint used by flocker-deploy.
-
-        Please do not use it as it may be removed in the near future.
-        """,
-        examples=[],
-    )
+    @private_api
     @structured(
         inputSchema={
             '$ref':
@@ -1035,7 +1049,8 @@ def api_dataset_from_dataset_and_node(dataset, node_uuid):
     return result
 
 
-def create_api_service(persistence_service, cluster_state_service, endpoint):
+def create_api_service(persistence_service, cluster_state_service, endpoint,
+                       context_factory):
     """
     Create a Twisted Service that serves the API on the given endpoint.
 
@@ -1047,10 +1062,20 @@ def create_api_service(persistence_service, cluster_state_service, endpoint):
 
     :param endpoint: Twisted endpoint to listen on.
 
+    :param context_factory: TLS context factory.
+
     :return: Service that will listen on the endpoint using HTTP API server.
     """
     api_root = Resource()
     user = ConfigurationAPIUserV1(persistence_service, cluster_state_service)
     api_root.putChild('v1', user.app.resource())
     api_root._v1_user = user  # For unit testing purposes, alas
-    return StreamServerEndpointService(endpoint, Site(api_root))
+
+    return StreamServerEndpointService(
+        endpoint,
+        TLSMemoryBIOFactory(
+            context_factory,
+            False,
+            Site(api_root)
+        )
+    )

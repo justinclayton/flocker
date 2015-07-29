@@ -12,7 +12,7 @@ RUN ["apt-get", "install", "--no-install-recommends", "-y", "git", "ruby-dev", "
 # See https://github.com/jordansissel/fpm/issues/611 and
 # https://github.com/jordansissel/fpm/issues/657
 RUN ["gem", "install", "fpm"]
-
-RUN ["pip", "install", "Twisted==15.1.0", "characteristic==14.1.0", "pyOpenSSL==0.14", "pycrypto==2.6.1", "virtualenv==12.1.1", "effect==0.1a13" , "boto==2.30.0", "requests==2.4.3", "requests-file==1.0", "ipaddr==2.1.11", "eliot==0.6.0", "pyrsistent==0.9.1"]
+COPY requirements.txt /tmp/
+RUN ["pip", "install", "-r", "/tmp/requirements.txt"]
 VOLUME /flocker
 ENTRYPOINT ["/flocker/admin/build-package-entrypoint", "--destination-path=/output"]

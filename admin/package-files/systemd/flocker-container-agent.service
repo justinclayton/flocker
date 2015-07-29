@@ -1,9 +1,9 @@
 [Unit]
 Description=Flocker Container Agent
-AssertFileNotEmpty=/etc/flocker/agent.yml
 
 [Service]
 ExecStart=/usr/sbin/flocker-container-agent
+Restart=always
 
 [Install]
 WantedBy=multi-user.target

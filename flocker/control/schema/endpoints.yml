@@ -87,8 +87,6 @@ definitions:
     properties:
       node_uuid:
         '$ref': 'types.json#/definitions/container_node_uuid'
-      host:
-        '$ref': 'types.json#/definitions/host'
       name:
         '$ref': 'types.json#/definitions/container_name'
       image:
@@ -121,7 +119,6 @@ definitions:
         '$ref': 'types.json#/definitions/running'
     required:
       - node_uuid
-      - host
       - name
       - image
       - running
@@ -141,7 +138,7 @@ definitions:
   configuration_datasets_update:
     description: |
       The input schema for the update_dataset endpoint.
-    "$ref": "types.json#/definitions/dataset_configuration"
+    "$ref": "types.json#/definitions/dataset_configuration_update"
 
   configuration_datasets_create:
     # XXX: The publicapi documentation builder currently fails unless the
@@ -182,9 +179,7 @@ definitions:
         path:
           '$ref': 'types.json#/definitions/node_path'
       required:
-        - primary
         - dataset_id
-        - path
       additionalProperties: false
 
   configuration_compose:
