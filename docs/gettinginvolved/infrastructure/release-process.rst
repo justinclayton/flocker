@@ -125,10 +125,6 @@ Preparing For a Release
 
    In addition, review the link-check step of the documentation builder to ensure that all the errors (the links with "[broken]") are expected.
 
-#. Make a pull request on GitHub:
-
-   The pull request should be for the release branch against ``master``, with a ``[FLOC-123]`` summary prefix, referring to the release issue that it resolves.
-
 #. Tag the version being released:
 
    .. prompt:: bash (flocker-0.1.2)$
@@ -189,6 +185,10 @@ Preparing For a Release
    .. prompt:: bash $
 
       rm -rf ${PWD}
+
+#. Make a pull request on GitHub:
+
+   The pull request should be for the release branch against ``master``, with a ``[FLOC-123]`` summary prefix, referring to the release issue that it resolves.
 
 #. Merge the release pull request.
    Do not delete the release branch because it may be used as a base branch for future releases.
