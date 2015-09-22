@@ -79,10 +79,9 @@ Access
 
 - Access to ClusterHQ's Google Drive for access to ClusterHQ versioning policy documents.
 
-.. _preparing-for-a-release:
 
-Preparing For a Release
------------------------
+Release
+-------
 
 #. Confirm that the release and the proposed version number have been approved.
 
