@@ -171,42 +171,6 @@ Preparing For a Release
 #. Make a pull request on GitHub:
 
    The pull request should be for the release branch against ``master``, with a ``[FLOC-123]`` summary prefix, referring to the release issue that it resolves.
-   Add a note to the pull request why any failed tests were deemed acceptable.
-
-   Wait for an accepted code review before continuing.
-
-.. _pre-tag-review:
-
-Pre-tag Review Process
-----------------------
-
-A tag must not be deleted once it has been pushed to GitHub (this is a policy and not a technical limitation).
-So it is important to check that the code in the release branch is working before it is tagged.
-
-.. note::
-
-   Make sure to follow the :ref:`latest review process <latest:pre-tag-review>` when reviewing a release.
-
-#. Check the changes in the Pull Request:
-
-   * The NEWS file has suitable changes.
-   * The release notes at :file:`docs/releasenotes/index.rst` should be up to date.
-   * The build should be passing to the team's satisfaction.
-     See "Ensure all the required tests pass on BuildBot" in :ref:`preparing-for-a-release`.
-
-   For some releases the Pull Request may include bug fixes or documentation changes which have been merged into the branch from which the release branch was created,
-   for example a previous pre-release.
-   These fixes can be ignored in this review.
-
-#. Update GitHub and JIRA:
-
-   If there were no problems spotted while checking the changes, comment on the Pull Request that the release engineer can continue by following :ref:`the Release section <release>`.
-   Do not merge the Pull Request as this should happen after the branch has been tagged.
-   Accept the JIRA issue, and add a comment that the release process can continue.
-
-   If a problem was spotted, add comments to the Pull Request for each problem, and comment that they must be resolved before repeating this review process.
-   Reject the JIRA issue and assign it to the release engineer.
-
 
 .. _release:
 
