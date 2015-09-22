@@ -188,6 +188,8 @@ Release
 #. Make a pull request on GitHub:
 
    The pull request should be for the release branch against ``master``, with a ``[FLOC-123]`` summary prefix, referring to the release issue that it resolves.
+   GitHub may say that "There isn’t anything to compare." if the branches are identical.
+   In this case, the release process is finished.
 
 #. Merge the release pull request.
    Do not delete the release branch because it may be used as a base branch for future releases.
