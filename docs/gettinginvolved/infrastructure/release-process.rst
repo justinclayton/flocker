@@ -91,7 +91,6 @@ Preparing For a Release
 
    The version number must adhere to :ref:`the Flocker version numbering policy <version-numbers>`.
 
-
 #. Set the version number of the release being created as an environment variable for later use:
 
    .. prompt:: bash $
