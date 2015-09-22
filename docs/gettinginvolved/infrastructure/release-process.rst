@@ -172,15 +172,6 @@ Preparing For a Release
 
    The pull request should be for the release branch against ``master``, with a ``[FLOC-123]`` summary prefix, referring to the release issue that it resolves.
 
-.. _release:
-
-Release
--------
-
-.. note::
-
-   The following commands must be run from within the virtualenv and directory created in :ref:`preparing-for-a-release`.
-
 #. Tag the version being released:
 
    .. prompt:: bash (flocker-0.1.2)$
